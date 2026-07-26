@@ -53,7 +53,7 @@ def _flatten(value: Any) -> str:
             for item in value:
                 rows.append("; ".join(f"{key}: {val}" for key, val in item.items()))
             return "\n".join(rows)
-        return "\n".join(f"• {item}" for item in value)
+        return "\n".join(f"- {item}" for item in value)
     if isinstance(value, dict):
         return "\n".join(f"{key}: {_flatten(val)}" for key, val in value.items())
     return str(value)
@@ -532,6 +532,69 @@ def _add_delivery_slide(prs: Presentation, proposal: Dict[str, Any], template_id
     return slide
 
 
+def _compact_slide_text(value: Any, max_length: int = 155) -> str:
+    text = " ".join(str(value).split())
+    if len(text) <= max_length:
+        return text
+    shortened = text[: max_length - 3].rsplit(" ", 1)[0]
+    return f"{shortened}..."
+
+
+def _proposal_slide_plan(proposal: Dict[str, Any]) -> List[Dict[str, Any]]:
+    plan = proposal.get("slide_plan", [])
+    valid = []
+    for item in plan:
+        if not isinstance(item, dict) or not item.get("title"):
+            continue
+        bullets = [_compact_slide_text(bullet) for bullet in item.get("bullets", []) if str(bullet).strip()]
+        valid.append({"title": str(item["title"]), "bullets": bullets[:5]})
+    if valid:
+        return valid
+
+    return [
+        {
+            "title": title,
+            "bullets": [_compact_slide_text(item) for item in proposal.get(section, [])][:5]
+            if isinstance(proposal.get(section), list)
+            else [_compact_slide_text(proposal.get(section, ""))],
+        }
+        for section, title in PROPOSAL_SECTIONS
+    ]
+
+
+def _add_proposal_section_slide(
+    prs: Presentation,
+    proposal: Dict[str, Any],
+    template_id: str,
+    page_number: int,
+    title: str,
+    bullets: List[str],
+):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _set_background(slide)
+    _add_section_title(slide, title, "Approved proposal content generated from the reviewed requirements and architecture.")
+
+    accent = [ACCENT, ACCENT_2, ACCENT_3, ACCENT_4][page_number % 4]
+    _add_bullet_box(slide, 0.72, 1.72, 7.55, 4.95, "Key points", bullets or ["No approved content was provided for this section."], accent=accent)
+
+    decisions = proposal.get("architecture_decisions", {})
+    decision_summary = decisions.get("executive_recommendation", "") if isinstance(decisions, dict) else ""
+    context = proposal.get("problem_statement") or proposal.get("executive_summary") or ""
+    _add_mini_card(slide, 8.55, 1.72, 3.78, 2.12, "Proposal context", _compact_slide_text(context, 280), accent=ACCENT_2)
+    _add_mini_card(
+        slide,
+        8.55,
+        4.1,
+        3.78,
+        2.0,
+        "Architecture decision",
+        _compact_slide_text(decision_summary, 260) or "Architecture approval is required before final export.",
+        accent=ACCENT_3,
+    )
+    _add_footer(slide, proposal, template_id, f"{page_number:02d}")
+    return slide
+
+
 def render_from_template(proposal: Dict[str, Any], template_id: str) -> Path:
     templates = list_templates()
     config = templates.get(template_id)
@@ -567,12 +630,15 @@ def render_starter_deck(proposal: Dict[str, Any], template_id: str = "starter") 
     prs.slide_height = Inches(7.5)
 
     _add_cover_slide(prs, proposal, template_id)
-    _add_expected_output_slide(prs, proposal, template_id)
-    _add_challenges_slide(prs, proposal, template_id)
-    _add_blueprint_slide(prs, proposal, template_id)
-    _add_stack_slide(prs, proposal, template_id)
-    _add_cost_slide(prs, proposal, template_id)
-    _add_delivery_slide(prs, proposal, template_id)
+    for page_number, section in enumerate(_proposal_slide_plan(proposal), start=1):
+        _add_proposal_section_slide(
+            prs,
+            proposal,
+            template_id,
+            page_number,
+            section["title"],
+            section["bullets"],
+        )
 
     output = proposal_output_dir() / f"proposal_{template_id}_{proposal['proposal_id']}.pptx"
     prs.save(output)
