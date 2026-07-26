@@ -1,0 +1,68 @@
+{
+  "templates": {
+    "starter": {
+      "name": "Starter Proposal Deck",
+      "description": "Generated fallback deck used when no enterprise PPTX template is available.",
+      "template_path": "",
+      "sections": {
+        "executive_summary": {},
+        "problem_statement": {},
+        "business_solution": {},
+        "technical_solution": {},
+        "infrastructure_design": {},
+        "cost_estimation": {},
+        "implementation_approach": {},
+        "risks": {},
+        "assumptions": {}
+      }
+    },
+    "fpt_fap": {
+      "name": "FPT FAP Template",
+      "description": "Place your enterprise template at templates/fpt_fap/template.pptx and use {{section_key}} placeholders.",
+      "template_path": "templates/fpt_fap/template.pptx",
+      "sections": {
+        "executive_summary": {},
+        "problem_statement": {},
+        "business_solution": {},
+        "technical_solution": {},
+        "infrastructure_design": {},
+        "cost_estimation": {},
+        "implementation_approach": {},
+        "risks": {},
+        "assumptions": {}
+      }
+    },
+    "malaysia": {
+      "name": "Malaysia Template",
+      "description": "Place your enterprise template at templates/malaysia/template.pptx and use {{section_key}} placeholders.",
+      "template_path": "templates/malaysia/template.pptx",
+      "sections": {
+        "executive_summary": {},
+        "problem_statement": {},
+        "business_solution": {},
+        "technical_solution": {},
+        "infrastructure_design": {},
+        "cost_estimation": {},
+        "implementation_approach": {},
+        "risks": {},
+        "assumptions": {}
+      }
+    },
+    "singapore": {
+      "name": "Singapore Template",
+      "description": "Place your enterprise template at templates/singapore/template.pptx and use {{section_key}} placeholders.",
+      "template_path": "templates/singapore/template.pptx",
+      "sections": {
+        "executive_summary": {},
+        "problem_statement": {},
+        "business_solution": {},
+        "technical_solution": {},
+        "infrastructure_design": {},
+        "cost_estimation": {},
+        "implementation_approach": {},
+        "risks": {},
+        "assumptions": {}
+      }
+    }
+  }
+}
