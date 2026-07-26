@@ -1,5 +1,5 @@
 import React from 'react';
-import { Upload, Users, FileText, MessageSquare, List } from 'lucide-react';
+import { Upload, FileText, MessageSquare, List } from 'lucide-react';
 
 const FeatureCard = ({ icon: Icon, title, description, onClick }) => (
   <div 
@@ -29,12 +29,6 @@ const MainPage = ({ setActivePage }) => {
           title="RFP Upload"
           description="Upload your RFPs to get started. Performs advanced sectioning and analysis that will form the foundation for the rest of the proposal process."
           onClick={() => setActivePage('RFP Upload')}
-        />
-        <FeatureCard
-          icon={Users}
-          title="Employee Matching"
-          description="Match your employees' skills and experience with the right RFPs to increase your proposal success rate."
-          onClick={() => setActivePage('Employee Matching')}
         />
         <FeatureCard
           icon={MessageSquare}

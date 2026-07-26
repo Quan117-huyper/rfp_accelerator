@@ -11,9 +11,8 @@ Request for Proposal (RFP) documents. It integrates with Azure Cosmos DB, Azure 
 import os
 
 # Third-party imports
-from azure.storage.blob import BlobServiceClient
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, make_response, request
+from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 # Local imports
@@ -21,7 +20,6 @@ from chat import run_interaction
 from extraction import get_extraction_progress, start_extraction_thread
 from global_vars import get_all_rfps
 from response import respond_to_requirement
-from search import search
 from upload import process_rfp
 from common.cosmosdb import CosmosDBManager
 
@@ -37,22 +35,10 @@ CORS(app)
 
 
 
-# # Azure Blob Storage configuration
-# STORAGE_ACCOUNT_CONNECTION_STRING = os.getenv("STORAGE_ACCOUNT_CONNECTION_STRING")
-# STORAGE_ACCOUNT_CONTAINER = "rfp"
-# STORAGE_ACCOUNT_RESUME_CONTAINER = os.getenv("STORAGE_ACCOUNT_RESUME_CONTAINER")
-
 # Azure OpenAI configuration
 AOAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
 AOAI_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AOAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-
-# # Initialize Azure clients
-# blob_service_client = BlobServiceClient.from_connection_string(STORAGE_ACCOUNT_CONNECTION_STRING)
-# blob_container_client = blob_service_client.get_container_client(STORAGE_ACCOUNT_CONTAINER)
-# blob_resume_container_client = blob_service_client.get_container_client(STORAGE_ACCOUNT_RESUME_CONTAINER)
-
-
 
 cosmos_manager = CosmosDBManager()
 
@@ -295,57 +281,6 @@ def get_rfp_analysis():
     except Exception as e:
         print(f"Error querying CosmosDB: {str(e)}")
         return jsonify({"error": "An error occurred while fetching RFP analysis"}), 500
-
-@app.route('/search', methods=['POST'])
-def search_employees():
-    """Search for employees based on RFP requirements."""
-    data = request.json
-    rfp_name = data.get('rfpName')
-    feedback = data.get('feedback')
-
-    if not rfp_name:
-        return jsonify({"error": "RFP name is required"}), 400
-
-    try:
-        results = search(rfp_name, feedback)
-        return jsonify({"results": results}), 200
-    except Exception as e:
-        print(f"Error during search: {str(e)}")
-        return jsonify({"error": "An error occurred during the search"}), 500
-
-@app.route('/resume', methods=['GET'])
-def get_resume():
-    """Get a resume PDF file."""
-    resume_name = request.args.get('resumeName')[:-4] + 'pdf'
-  
-    blob_client = blob_resume_container_client.get_blob_client('pdf/' + resume_name)
-    download_stream = blob_client.download_blob()
-    file_content = download_stream.readall()
-    
-    if file_content:
-        response = make_response(file_content)
-        response.headers['Content-Type'] = 'application/pdf'
-        return response
-    else:
-        return make_response('Failed to download file', 500)
-    
-
-
-@app.route('/download', methods=['GET'])
-def download_resume():
-    resume_name = request.args.get('resumeName')
-  
-    blob_client = blob_resume_container_client.get_blob_client('processed/' + resume_name)
-    download_stream = blob_client.download_blob()
-    file_content = download_stream.readall()
-    
-    if file_content:
-        response = make_response(file_content)
-        response.headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        return response
-    else:
-        return make_response('Failed to download file', 500)
-
 
 @app.route('/start-extraction', methods=['POST'])
 def start_extraction():

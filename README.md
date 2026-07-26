@@ -16,7 +16,6 @@ The RFP Accelerator is an application that allows various operations to be perfo
 ## Features
 
 - Upload - Intelligent, AI-powered document chunking and "RFP at a glance"
-- Employee Matching - Find the right employees for a given RFP based on skillset or other attributes
 - RFP Analyzer - Ask questions about the RFP
 - Requirements Extraction - extract requirements or any other structured data from the RFP
 - Response builder - Start building your response to the RFP
@@ -34,7 +33,6 @@ Each module of the accelerator requires a different set of Azure services. Below
 | Module | Required Azure Services |
 |--------|-------------------------|
 | Upload | - Azure Data Lake Storage<br>- Azure Document Intelligence<br>- Azure OpenAI<br>- Azure Cosmos DB<br>- Managed identity between Document Intelligence and Data Lake Storage |
-| Employee Matching | - Azure Data Lake Storage<br>- Azure Document Intelligence<br>- Azure OpenAI<br>- Azure Cosmos DB<br>- Azure AI Search |
 | RFP Analyzer | - Azure Cosmos DB<br>- Azure OpenAI |
 | Requirements Extraction | - Azure Cosmos DB<br>- Azure OpenAI |
 | Response Builder | - Azure Cosmos DB<br>- Azure OpenAI<br>- Azure AI Search (optional)<br>- Bing Search (optional)|
@@ -118,10 +116,6 @@ Each module of the accelerator requires a different set of Azure services. Below
    - **Azure Data Lake Storage**
      - Create a Storage Account with hierarchical namespace enabled
      - Create a container named "rfp"
-     - If you plan to use Employee Matching, create a container named "resumes" and two folders within that container named "source" and "processed". Upload your employee resumes to the "source" folder and run 
-         ```sh
-         py scripts/resume-indexing.py
-         ```
    
    - **Bing Search Service** (Optional)
      - Required only if you want RFP responses to include web search results
