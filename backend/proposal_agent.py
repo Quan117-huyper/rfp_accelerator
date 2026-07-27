@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from foundry_responses import create_json_response, is_configured as azure_openai_configured
+from foundry_published_agents import is_configured as published_agent_configured, invoke as invoke_published_agent
+from slide_planner import build_slide_plan
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -98,6 +100,57 @@ OFFICIAL_AZURE_SOURCE_HOSTS = (
     "github.com/azure",
     "github.com/microsoft",
 )
+
+RESEARCH_MODES = {"off", "azure_official_only", "azure_github_papers"}
+
+ARCHITECT_RESEARCH_POLICIES = {
+    "off": {
+        "mode": "off",
+        "description": "No public web search. Use confirmed requirements and private references only.",
+        "allowed_source_types": [],
+        "allowed_hosts": [],
+        "safe_web_queries": [],
+    },
+    "azure_official_only": {
+        "mode": "azure_official_only",
+        "description": "Use Microsoft first-party Azure documentation and Microsoft/Azure GitHub repositories only.",
+        "allowed_source_types": ["azure_docs", "microsoft_github"],
+        "allowed_hosts": ["learn.microsoft.com", "azure.microsoft.com", "github.com/Azure", "github.com/microsoft"],
+        "safe_web_queries": [
+            "site:learn.microsoft.com Azure AI Search metadata filters security",
+            "site:learn.microsoft.com Azure AI Document Intelligence layout model scanned PDF tables",
+            "site:learn.microsoft.com Azure Container Apps jobs scale to zero",
+            "site:learn.microsoft.com Azure Retail Prices API",
+        ],
+    },
+    "azure_github_papers": {
+        "mode": "azure_github_papers",
+        "description": "Use Azure official docs, Microsoft/Azure GitHub references, and public research papers for architecture evidence.",
+        "allowed_source_types": ["azure_docs", "microsoft_github", "research_paper"],
+        "allowed_hosts": [
+            "learn.microsoft.com",
+            "azure.microsoft.com",
+            "github.com/Azure",
+            "github.com/microsoft",
+            "arxiv.org",
+            "aclanthology.org",
+            "openreview.net",
+            "paperswithcode.com",
+        ],
+        "safe_web_queries": [
+            "site:learn.microsoft.com Azure AI Search metadata filters security",
+            "site:learn.microsoft.com Azure AI Document Intelligence layout model scanned PDF tables",
+            "site:learn.microsoft.com Azure Container Apps jobs scale to zero",
+            "site:learn.microsoft.com Azure Retail Prices API",
+            "site:github.com/Azure azure ai search samples vector search metadata filters",
+            "site:github.com/microsoft document intelligence samples layout extraction",
+            "site:arxiv.org retrieval augmented generation enterprise access control metadata filtering",
+            "site:aclanthology.org retrieval augmented generation citation grounded answers",
+            "site:openreview.net agentic workflow tool use human in the loop",
+            "site:paperswithcode.com retrieval augmented generation evaluation",
+        ],
+    },
+}
 
 LOW_COST_POC_OPTIONAL_SERVICES = {
     "azure api management",
@@ -311,47 +364,294 @@ Quality guide:
 
 
 def extract_requirements_from_chunks(chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Extract requirements in bounded batches so long documents are never silently truncated."""
-    batches: List[List[Dict[str, Any]]] = []
-    current: List[Dict[str, Any]] = []
-    current_size = 0
-    for chunk in chunks:
-        text = str(chunk.get("text", ""))
-        if not text:
-            continue
-        if current and current_size + len(text) > 40000:
-            batches.append(current)
-            current = []
-            current_size = 0
-        current.append(chunk)
-        current_size += len(text)
-    if current:
-        batches.append(current)
+    """Extract requirements exclusively through the published Foundry Requirement Agent."""
+    if not published_agent_configured("requirement"):
+        return _published_requirement_failure("Published Requirement Agent is not configured.")
 
-    combined: Dict[str, List[str]] = {field: [] for field in REQUIREMENT_FIELDS}
-    modes: List[str] = []
-    errors: List[str] = []
-    for batch in batches:
-        batch_text = "\n\n".join(
-            f"[chunk_id={chunk['chunk_id']} section={chunk['section']} pages={chunk['page_start']}-{chunk['page_end']}]\n{chunk['text']}"
-            for chunk in batch
-        )
-        result = extract_requirements(batch_text)
-        modes.append(str(result.get("mode", "unknown")))
-        if result.get("provider_error"):
-            errors.append(str(result["provider_error"]))
-        for field in REQUIREMENT_FIELDS:
-            combined[field].extend(result.get("extracted", {}).get(field, []))
+    try:
+        clean_chunks = [chunk for chunk in chunks if str(chunk.get("text", "")).strip()]
+        agent_outputs = [_invoke_requirement_agent_batch([chunk]) for chunk in clean_chunks] if len(clean_chunks) > 1 else [
+            _invoke_requirement_agent_batch(clean_chunks)
+        ]
+        agent_output = _merge_requirement_agent_outputs(agent_outputs)
+        raw_requirements = agent_output.get("requirements", {})
+        extracted = _sanitize_extracted_requirements(_requirement_statements(raw_requirements))
+        canonical_records = _canonical_agent_requirement_records(raw_requirements, extracted)
+        questions = _completion_questions_from_agent(agent_output) + _global_conflict_questions(extracted)
+        return {
+            "mode": "foundry_published_requirement_agent",
+            "extracted": extracted,
+            # Keep the raw Foundry response in the caller's checkpoint if needed, but only
+            # pass this canonical, de-duplicated record set to later workflow stages.
+            "agent_requirements": canonical_records,
+            "traceability": _traceability_from_agent_records(canonical_records, extracted, chunks),
+            "clarification_questions": _dedupe_questions(questions)[:3],
+            "batch_count": len(agent_outputs),
+            "provider_errors": [],
+            "quality_guide": FIELD_QUALITY_GUIDE,
+            "quality_notes": agent_output.get("summary", agent_output.get("quality_notes", {})),
+        }
+    except Exception as exc:
+        return _published_requirement_failure(f"Published Requirement Agent failed: {exc}")
 
-    cleaned = _sanitize_extracted_requirements(combined)
+
+def _invoke_requirement_agent_batch(chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return invoke_published_agent(
+        "requirement",
+        {
+            "document_context": {
+                "input_type": "requirement_document",
+                "data_sensitivity": "customer_provided",
+                "extraction_scope": "whole_document" if len(chunks) == 1 and str(chunks[0].get("section")) == "Whole Document" else "chunk",
+                "global_merge_follows": True,
+            },
+            "chunks": [
+                {
+                    "chunk_id": chunk.get("chunk_id"),
+                    "section": chunk.get("section"),
+                    "heading_path": chunk.get("heading_path"),
+                    "page_start": chunk.get("page_start"),
+                    "page_end": chunk.get("page_end"),
+                    "estimated_tokens": chunk.get("estimated_tokens"),
+                    "text": str(chunk.get("text", "")),
+                }
+                for chunk in chunks
+                if str(chunk.get("text", "")).strip()
+            ],
+        },
+    )
+
+
+def _merge_requirement_agent_outputs(agent_outputs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    merged_requirements: Dict[str, List[Any]] = {field: [] for field in REQUIREMENT_FIELDS}
+    questions: List[Any] = []
+    summaries: List[Any] = []
+    for output in agent_outputs:
+        requirements = output.get("requirements") or {}
+        if isinstance(requirements, dict):
+            for field in REQUIREMENT_FIELDS:
+                values = requirements.get(field) or []
+                if isinstance(values, list):
+                    merged_requirements[field].extend(values)
+        form = output.get("completion_form") or output.get("questions") or []
+        if isinstance(form, list):
+            questions.extend(form)
+        summary = output.get("summary") or output.get("quality_notes")
+        if summary:
+            summaries.append(summary)
     return {
-        "mode": "chunked_" + ("azure_openai" if "azure_openai" in modes else "fallback"),
-        "extracted": cleaned,
-        "traceability": _build_traceability(cleaned, chunks),
-        "batch_count": len(batches),
-        "provider_errors": errors,
+        "requirements": merged_requirements,
+        "completion_form": questions,
+        "summary": {"chunk_summaries": summaries} if len(summaries) > 1 else (summaries[0] if summaries else {}),
+    }
+
+
+def _published_requirement_failure(error: str) -> Dict[str, Any]:
+    return {
+        "mode": "failed",
+        "error": error,
+        "extracted": {field: [] for field in REQUIREMENT_FIELDS},
+        "traceability": {},
+        "batch_count": 0,
+        "provider_errors": [error],
         "quality_guide": FIELD_QUALITY_GUIDE,
     }
+
+
+def _requirement_statements(requirements: Any) -> Dict[str, List[str]]:
+    """Convert Foundry Agent records into the compact UI format without losing raw records."""
+    statements: Dict[str, List[str]] = {field: [] for field in REQUIREMENT_FIELDS}
+    if not isinstance(requirements, dict):
+        return statements
+    for field in REQUIREMENT_FIELDS:
+        for item in requirements.get(field, []):
+            if isinstance(item, dict):
+                statement = str(item.get("statement", "")).strip()
+            else:
+                statement = str(item).strip()
+            if statement:
+                statements[field].append(statement)
+    return statements
+
+
+def _requirements_with_ids(extracted: Dict[str, List[str]]) -> Dict[str, List[Dict[str, str]]]:
+    """Provide a deterministic fallback contract when a legacy extraction is used."""
+    records: Dict[str, List[Dict[str, str]]] = {field: [] for field in REQUIREMENT_FIELDS}
+    index = 1
+    for field in REQUIREMENT_FIELDS:
+        for statement in extracted.get(field, []):
+            records[field].append({"id": f"REQ-{index:03d}", "statement": str(statement)})
+            index += 1
+    return records
+
+
+def _canonical_agent_requirement_records(
+    requirements: Any, extracted: Dict[str, List[str]]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Retain the source agent's IDs while aligning records with the canonical UI set.
+
+    A Foundry agent can put the same obligation in two categories (for example,
+    SharePoint under both functional requirements and integrations).  The compact
+    ``extracted`` set already resolves that ambiguity.  This function makes the
+    record-level contract follow the same decision before Architect receives it.
+    """
+    canonical: Dict[str, List[Dict[str, Any]]] = {field: [] for field in REQUIREMENT_FIELDS}
+    candidates: List[Dict[str, Any]] = []
+    if isinstance(requirements, dict):
+        for proposed_field in REQUIREMENT_FIELDS:
+            for item in requirements.get(proposed_field, []):
+                if not isinstance(item, dict):
+                    continue
+                statement = str(item.get("statement", "")).strip()
+                if not statement:
+                    continue
+                record = dict(item)
+                record["statement"] = statement
+                record["_canonical_category"] = _canonical_requirement_category(statement, proposed_field)
+                candidates.append(record)
+
+    used_positions: set[int] = set()
+    generated_id = 1
+    for field in REQUIREMENT_FIELDS:
+        for statement in extracted.get(field, []):
+            match_index = next(
+                (
+                    index
+                    for index, item in enumerate(candidates)
+                    if index not in used_positions
+                    and item["_canonical_category"] == field
+                    and _same_requirement(str(item["statement"]), statement)
+                ),
+                None,
+            )
+            if match_index is None:
+                match_index = next(
+                    (
+                        index
+                        for index, item in enumerate(candidates)
+                        if index not in used_positions
+                        and _same_requirement(str(item["statement"]), statement)
+                    ),
+                    None,
+                )
+            if match_index is None:
+                record: Dict[str, Any] = {
+                    "id": f"REQ-CANON-{generated_id:03d}",
+                    "statement": statement,
+                    "source_chunk_ids": [],
+                    "confidence": "medium",
+                }
+                generated_id += 1
+            else:
+                used_positions.add(match_index)
+                record = dict(candidates[match_index])
+                record.pop("_canonical_category", None)
+                record["statement"] = statement
+            canonical[field].append(record)
+    return canonical
+
+
+def _traceability_from_agent_records(
+    requirements: Any, extracted: Dict[str, List[str]], chunks: List[Dict[str, Any]]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Use the agent's chunk IDs when present, then fill any gaps deterministically."""
+    fallback = _build_traceability(extracted, chunks)
+    if not isinstance(requirements, dict):
+        return fallback
+
+    records: Dict[str, List[Dict[str, Any]]] = {field: [] for field in REQUIREMENT_FIELDS}
+    for field in REQUIREMENT_FIELDS:
+        source_items = [item for item in requirements.get(field, []) if isinstance(item, dict)]
+        for position, statement in enumerate(extracted.get(field, [])):
+            source_item = next(
+                (item for item in source_items if str(item.get("statement", "")).strip() == statement),
+                None,
+            )
+            if source_item:
+                source = source_item.get("source", {}) if isinstance(source_item.get("source"), dict) else {}
+                source_chunk_ids = source_item.get("source_chunk_ids") or (
+                    [source.get("chunk_id")] if source.get("chunk_id") else []
+                )
+                records[field].append(
+                    {
+                        "id": source_item.get("id"),
+                        "statement": statement,
+                        "source_chunk_ids": [str(item) for item in source_chunk_ids if item],
+                        "confidence": str(source_item.get("confidence") or "medium"),
+                    }
+                )
+            else:
+                records[field].append(fallback[field][position])
+    return records
+
+
+def _completion_questions_from_agent(agent_output: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Adapt the published Requirement Agent's completion form to the existing HITL UI."""
+    questions = agent_output.get("completion_form") or agent_output.get("questions") or []
+    normalized = []
+    for item in questions:
+        if not isinstance(item, dict) or not item.get("question"):
+            continue
+        normalized.append(
+            {
+                "id": str(item.get("id") or f"Q-{len(normalized) + 1:03d}"),
+                "requirement_id": str(item.get("requirement_id") or ""),
+                "field": str(item.get("field") or "clarification"),
+                "question": str(item["question"]),
+                "reason": str(item.get("impact") or item.get("why_it_matters") or "Needed before architecture approval."),
+                "answer_type": str(item.get("answer_type") or "text"),
+                "options": [str(option) for option in item.get("options", item.get("suggested_options", [])) if str(option).strip()],
+            }
+        )
+    return normalized[:3]
+
+
+def _global_conflict_questions(extracted: Dict[str, List[str]]) -> List[Dict[str, str]]:
+    all_statements = [
+        statement
+        for values in extracted.values()
+        for statement in values
+        if isinstance(statement, str)
+    ]
+    joined = " ".join(all_statements).lower()
+    questions = []
+    if re.search(r"\b30\s+days?\b", joined) and re.search(r"\b90\s+days?\b", joined):
+        questions.append(
+            {
+                "id": "GLOBAL-RETENTION-001",
+                "requirement_id": "",
+                "field": "retention_policy",
+                "question": "Which retention policy is authoritative for uploaded customer source documents: 30 days, 90 days, or another period?",
+                "reason": "Conflicting retention requirements were found across document sections.",
+                "answer_type": "single_select",
+                "options": ["30 days", "90 days", "Other"],
+            }
+        )
+    if "availability" in joined and any(term in joined for term in ["to be confirmed", "tbd", "confirm during solution design"]):
+        questions.append(
+            {
+                "id": "GLOBAL-AVAILABILITY-001",
+                "requirement_id": "",
+                "field": "availability_target",
+                "question": "What availability target should the POC architecture use until production SLA is finalized?",
+                "reason": "Availability is referenced but left open for solution design.",
+                "answer_type": "text",
+                "options": [],
+            }
+        )
+    return questions
+
+
+def _dedupe_questions(questions: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    deduped = []
+    seen = set()
+    for question in questions:
+        key = _requirement_fingerprint(str(question.get("field") or "") + " " + str(question.get("question") or ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(question)
+    return deduped
 
 
 def _build_traceability(extracted: Dict[str, List[str]], chunks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -524,7 +824,7 @@ def fallback_generate_proposal(
         ],
         "extracted_requirements": extracted,
     }
-    proposal["slide_plan"] = _fallback_slide_plan(proposal)
+    proposal["slide_plan"] = build_slide_plan(proposal)
     return proposal
 
 
@@ -604,8 +904,9 @@ def generate_proposal(
     cost_assumptions: Optional[List[Dict[str, Any]]] = None,
     template_id: str = "starter",
     architecture_approved: bool = False,
+    confirmed_requirements: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Draft proposal content with Azure OpenAI, retaining a deterministic fallback."""
+    """Draft proposal content with the Published Proposal Agent and retain renderer-compatible metadata."""
     fallback = fallback_generate_proposal(
         extracted,
         clarifications,
@@ -614,7 +915,43 @@ def generate_proposal(
         template_id,
         architecture_approved,
     )
+    if published_agent_configured("proposal"):
+        try:
+            raw_proposal = invoke_published_agent(
+                "proposal",
+                {
+                    "customer_context": {"input_type": "approved_customer_requirement_document"},
+                    "confirmed_requirements": confirmed_requirements or _requirements_with_ids(extracted),
+                    "confirmed_hitl_answers": clarifications or {},
+                    "approved_architecture": architecture_decisions or {},
+                    "cost_assumptions": cost_assumptions or [],
+                    "template_rules": {
+                        "template_id": template_id,
+                        "max_bullets_per_slide": 5,
+                        "component_card_max_lines": 3,
+                        "preserve_branding": True,
+                        "preserve_placeholder_positions": True,
+                        "supported_layout_ids": [
+                            "title", "customer_context", "problem_impact", "goals_kpi",
+                            "four_column_value_chain", "process_flow", "logical_architecture",
+                            "component_cards", "infrastructure_security", "cost_table", "roadmap",
+                        ],
+                    },
+                },
+            )
+            pptagent_input = raw_proposal.get("pptagent_input", raw_proposal)
+            if not isinstance(pptagent_input, dict) or not isinstance(pptagent_input.get("slides"), list):
+                raise ValueError("Published Proposal Agent returned no pptagent_input.slides array.")
+            fallback["pptagent_input"] = pptagent_input
+            fallback["proposal_agent_output"] = raw_proposal
+            fallback["generation_mode"] = "foundry_published_proposal_agent"
+            return fallback
+        except Exception as exc:
+            fallback["generation_mode"] = "failed"
+            fallback["generation_error"] = str(exc)
+            return fallback
     if not azure_openai_configured():
+        fallback["generation_mode"] = "fallback"
         return fallback
 
     prompt = f"""
@@ -664,6 +1001,7 @@ use only approved cost assumptions or return TBD. Keep at most five bullets per 
     try:
         generated, _ = create_json_response(prompt)
     except Exception:
+        fallback["generation_mode"] = "fallback"
         return fallback
 
     allowed_keys = {
@@ -681,7 +1019,9 @@ use only approved cost assumptions or return TBD. Keep at most five bullets per 
     for key in allowed_keys:
         if key in generated and generated[key]:
             fallback[key] = generated[key]
-    fallback["slide_plan"] = _normalize_slide_plan(fallback.get("slide_plan"), fallback)
+    # The LLM drafts proposal copy; deterministic planning owns narrative order,
+    # layout selection, and compact renderer-safe slide content.
+    fallback["slide_plan"] = build_slide_plan(fallback)
     fallback["generation_mode"] = "azure_openai"
     return fallback
 
@@ -720,11 +1060,54 @@ def _infer_architecture_patterns(extracted: Dict[str, List[str]]) -> List[str]:
 
 
 def _is_official_azure_source(url: str) -> bool:
-    normalized = url.lower().split("//", 1)[-1].split("/", 1)[0]
-    return any(normalized == host or normalized.endswith(f".{host}") for host in OFFICIAL_AZURE_SOURCE_HOSTS)
+    host = url.lower().split("//", 1)[-1].split("/", 1)[0]
+    if any(host == source_host or host.endswith(f".{source_host}") for source_host in ("learn.microsoft.com", "azure.microsoft.com")):
+        return True
+    lowered = url.lower()
+    return lowered.startswith("https://github.com/azure/") or lowered.startswith("https://github.com/microsoft/")
 
 
-def _normalize_sources(sources: Any, official_only: bool) -> List[Dict[str, str]]:
+def _source_host(url: str) -> str:
+    return url.lower().split("//", 1)[-1].split("/", 1)[0]
+
+
+def _classify_source(url: str) -> str:
+    host = _source_host(url)
+    if host in {"learn.microsoft.com", "azure.microsoft.com"} or host.endswith(".microsoft.com"):
+        return "azure_docs"
+    if host == "github.com":
+        lowered = url.lower()
+        if lowered.startswith("https://github.com/azure/") or lowered.startswith("https://github.com/microsoft/"):
+            return "microsoft_github"
+        return "github"
+    if host in {"arxiv.org", "aclanthology.org", "openreview.net", "paperswithcode.com"}:
+        return "research_paper"
+    return "web"
+
+
+def _source_allowed(url: str, research_mode: str) -> bool:
+    if research_mode == "off":
+        return False
+    if research_mode == "azure_official_only":
+        return _is_official_azure_source(url)
+    if research_mode == "azure_github_papers":
+        source_type = _classify_source(url)
+        return source_type in {"azure_docs", "microsoft_github", "research_paper"}
+    return _is_official_azure_source(url)
+
+
+def _normalize_research_mode(research_mode: str) -> str:
+    return research_mode if research_mode in RESEARCH_MODES else "azure_official_only"
+
+
+def _research_policy(research_mode: str) -> Dict[str, Any]:
+    normalized_mode = _normalize_research_mode(research_mode)
+    policy = dict(ARCHITECT_RESEARCH_POLICIES[normalized_mode])
+    policy["never_send_customer_content_to_web_search"] = True
+    return policy
+
+
+def _normalize_sources(sources: Any, research_mode: str) -> List[Dict[str, str]]:
     normalized: List[Dict[str, str]] = []
     seen = set()
     for source in sources or []:
@@ -733,14 +1116,15 @@ def _normalize_sources(sources: Any, official_only: bool) -> List[Dict[str, str]
         if not isinstance(source, dict):
             continue
         url = str(source.get("url", "")).strip()
-        if not url or url in seen or (official_only and not _is_official_azure_source(url)):
+        if not url or url in seen or not _source_allowed(url, research_mode):
             continue
+        source_type = str(source.get("source_type") or _classify_source(url))
         normalized.append(
             {
                 "title": str(source.get("title") or url),
                 "url": url,
-                "source_type": str(source.get("source_type") or "web"),
-                "summary": str(source.get("summary") or "Official source used to validate architecture guidance."),
+                "source_type": source_type,
+                "summary": str(source.get("summary") or "Source used to validate architecture guidance."),
             }
         )
         seen.add(url)
@@ -987,8 +1371,7 @@ def _normalize_architecture(
     private_references: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     research_requested = research_mode != "off"
-    official_only = research_mode == "azure_official_only"
-    usable_sources = _normalize_sources(sources, official_only)
+    usable_sources = _normalize_sources(sources, _normalize_research_mode(research_mode))
     research_status = "completed" if usable_sources else ("blocked" if research_requested else "not_requested")
     components = _ensure_architecture_coverage(
         _normalize_components(architecture.get("components"), extracted), extracted
@@ -1034,26 +1417,59 @@ def research_architecture(
     research_mode: str = "azure_official_only",
     project_context: Optional[Dict[str, Any]] = None,
     private_references: Optional[List[Dict[str, str]]] = None,
+    agent_requirements: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Create a validated architecture draft, optionally grounded by Azure official web research."""
+    """Create a validated architecture draft with optional safe public research."""
+    normalized_mode = _normalize_research_mode(research_mode)
+    policy = _research_policy(normalized_mode)
+    if published_agent_configured("architect"):
+        try:
+            raw_architecture = invoke_published_agent(
+                "architect",
+                {
+                    "confirmed_requirements": agent_requirements or _requirements_with_ids(extracted),
+                    "confirmed_hitl_answers": clarifications or {},
+                    "project_context": project_context or {},
+                    "research_policy": policy,
+                },
+            )
+            architecture_payload = raw_architecture.get("architecture", raw_architecture)
+            if isinstance(architecture_payload, dict) and not architecture_payload.get("components"):
+                architecture_payload = {
+                    **architecture_payload,
+                    "components": architecture_payload.get("azure_services", []),
+                }
+            architecture = _normalize_architecture(
+                architecture_payload,
+                extracted,
+                raw_architecture.get("sources", []),
+                normalized_mode,
+                private_references,
+            )
+            return {
+                "mode": "foundry_published_architect_agent",
+                "research_policy": policy,
+                "architecture": architecture,
+                "sources": architecture["research_sources"],
+                "agent_output": raw_architecture,
+            }
+        except Exception as exc:
+            if not azure_openai_configured():
+                return {"mode": "failed", "error": str(exc), "architecture": {}, "sources": [], "research_policy": policy}
+
     if not azure_openai_configured():
         return {
             "mode": "unavailable",
-            "error": "Configure Azure OpenAI credentials on the backend before running web research.",
+            "error": "Configure the Published Architect Agent or Azure OpenAI Responses credentials before running architecture research.",
             "architecture": {},
             "sources": [],
+            "research_policy": policy,
         }
 
     safe_requirements = {
         field: values for field, values in extracted.items() if field in REQUIREMENT_FIELDS
     }
-    normalized_mode = research_mode if research_mode in {"off", "azure_official_only"} else "azure_official_only"
-    safe_web_queries = [
-        "site:learn.microsoft.com Azure AI Search metadata filters security",
-        "site:learn.microsoft.com Azure AI Document Intelligence layout model scanned PDF tables",
-        "site:learn.microsoft.com Azure Container Apps jobs scale to zero",
-        "site:learn.microsoft.com Azure Retail Prices API",
-    ]
+    safe_web_queries = policy["safe_web_queries"]
     private_reference_summaries = [
         {
             "document_name": str(reference.get("document_name") or "reference-document"),
@@ -1078,15 +1494,20 @@ Private reference excerpts JSON:
 {json.dumps(private_reference_summaries, indent=2)}
 
 Research mode: {normalized_mode}
+Research policy JSON:
+{json.dumps(policy, indent=2)}
+
 Safe web queries, if research mode is not off: {json.dumps(safe_web_queries)}
 
 RESEARCH POLICY
-- When research mode is azure_official_only, invoke Web Search before writing the architecture.
+- When research mode is azure_official_only or azure_github_papers, invoke Web Search before writing the architecture.
 - Search only the safe web queries above. Never put customer requirement text, customer names,
   private URLs, credentials, or internal identifiers into a Web Search query.
 - Private reference excerpts are trusted project context. Never include their content in a Web Search query.
-- For Azure claims, use only Microsoft first-party sources. Do not invent current capabilities,
-  regions, limits, prices, SLAs, or citations.
+- For Azure claims, use only Microsoft first-party sources.
+- For GitHub implementation evidence, use only github.com/Azure or github.com/microsoft repositories.
+- For research-paper evidence, use only arxiv.org, aclanthology.org, openreview.net, or paperswithcode.com.
+- Do not invent current capabilities, regions, limits, prices, SLAs, paper findings, repository behavior, or citations.
 - If Web Search is unavailable, return a draft with research_status "blocked" and use "TBD"
   instead of unverified current facts or prices.
 
@@ -1139,21 +1560,23 @@ Keep the answer concise. Return no more than three decision questions.
         )
         return {
             "mode": "azure_openai_web_search" if normalized_mode != "off" else "azure_openai",
+            "research_policy": policy,
             "architecture": architecture,
             "sources": architecture["research_sources"],
         }
     except Exception as exc:
-        return {"mode": "failed", "error": str(exc), "architecture": {}, "sources": []}
+        return {"mode": "failed", "error": str(exc), "architecture": {}, "sources": [], "research_policy": policy}
 
 
 def analyze_document(ingestion: Dict[str, Any], clarifications: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     extraction = extract_requirements_from_chunks(ingestion.get("chunks", []))
     extracted = extraction.get("extracted", {})
-    questions = build_clarification_questions(extracted)
+    questions = extraction.get("clarification_questions") or build_clarification_questions(extracted)
     return {
         "extraction_mode": extraction.get("mode", "llm"),
         "extracted": extracted,
         "traceability": extraction.get("traceability", {}),
+        "agent_requirements": extraction.get("agent_requirements"),
         "ingestion": {
             "document_id": ingestion.get("document_id"),
             "filename": ingestion.get("filename"),
@@ -1163,8 +1586,10 @@ def analyze_document(ingestion: Dict[str, Any], clarifications: Optional[Dict[st
                 {
                     "chunk_id": chunk.get("chunk_id"),
                     "section": chunk.get("section"),
+                    "heading_path": chunk.get("heading_path"),
                     "page_start": chunk.get("page_start"),
                     "page_end": chunk.get("page_end"),
+                    "estimated_tokens": chunk.get("estimated_tokens"),
                 }
                 for chunk in ingestion.get("chunks", [])
             ],

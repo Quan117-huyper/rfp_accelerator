@@ -7,3 +7,14 @@ scripts/local-testing.py
 scripts/get-codebase.py
 *.log
 generated/
+modules/PPTAgent/
+storage/uploads/*
+!storage/uploads/.gitkeep
+storage/proposals/*
+!storage/proposals/.gitkeep
+storage/previews/*
+!storage/previews/.gitkeep
+storage/outputs/*
+!storage/outputs/.gitkeep
+database/*.db
+database/*.db-*

@@ -1,0 +1,18 @@
+{
+  "template_id": "starter",
+  "name": "Starter Proposal Deck",
+  "version": "1.0.0",
+  "renderer": "python-pptx",
+  "layouts": [
+    {"layout_id": "context", "slide_type": "customer_context", "max_bullets": 5},
+    {"layout_id": "problem-impact", "slide_type": "problem_statement", "max_bullets": 5},
+    {"layout_id": "goal-metrics", "slide_type": "goals", "max_bullets": 5},
+    {"layout_id": "problem-capability-value", "slide_type": "solution_overview", "max_bullets": 5},
+    {"layout_id": "process-flow", "slide_type": "business_flow", "max_bullets": 5},
+    {"layout_id": "layered-architecture", "slide_type": "high_level_architecture", "max_bullets": 5},
+    {"layout_id": "differentiator-cards", "slide_type": "design_differentiators", "max_bullets": 5},
+    {"layout_id": "infra-security", "slide_type": "infrastructure_security", "max_bullets": 5},
+    {"layout_id": "cost-table", "slide_type": "cost", "max_bullets": 5},
+    {"layout_id": "roadmap", "slide_type": "benefits_roadmap", "max_bullets": 5}
+  ]
+}

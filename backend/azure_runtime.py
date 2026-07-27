@@ -17,12 +17,13 @@ def _truthy_environment(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _credential_for_runtime():
+def credential_for_runtime():
     """Use browser sign-in only when a local developer explicitly opts in.
 
     Deployed workloads continue to use DefaultAzureCredential so the VM can use a
     managed identity with no browser dependency.
     """
+    _ensure_azure_cli_on_path()
     from azure.identity import DefaultAzureCredential, DeviceCodeCredential, InteractiveBrowserCredential
 
     if _truthy_environment("AZURE_USE_DEVICE_CODE"):
@@ -56,7 +57,7 @@ def load_azure_runtime_configuration() -> Dict[str, str]:
         _ensure_azure_cli_on_path()
         from azure.keyvault.secrets import SecretClient
 
-        client = SecretClient(vault_url=vault_url, credential=_credential_for_runtime())
+        client = SecretClient(vault_url=vault_url, credential=credential_for_runtime())
         fetched = 0
         for environment_name, secret_name in SECRET_NAMES.items():
             if os.getenv(environment_name):

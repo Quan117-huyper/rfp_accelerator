@@ -63,6 +63,22 @@
         "risks": {},
         "assumptions": {}
       }
+    },
+    "master_template": {
+      "name": "Enterprise Master Template",
+      "description": "Maps proposal content into the provided master deck structure at templates/master_template/template.pptx.",
+      "template_path": "templates/master_template/template.pptx",
+      "sections": {
+        "executive_summary": {},
+        "problem_statement": {},
+        "business_solution": {},
+        "technical_solution": {},
+        "infrastructure_design": {},
+        "cost_estimation": {},
+        "implementation_approach": {},
+        "risks": {},
+        "assumptions": {}
+      }
     }
   }
 }

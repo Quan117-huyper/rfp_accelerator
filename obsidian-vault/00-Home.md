@@ -4,6 +4,7 @@ This vault is the project map for the proposal-only version of the app.
 ## Start Here
 
 - [[10-Scope]]
+- [[15-Project-Structure]]
 - [[20-System-Map]]
 - [[30-Backend-Modules]]
 - [[40-Frontend-Modules]]
